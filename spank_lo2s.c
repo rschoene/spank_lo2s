@@ -163,6 +163,30 @@ static spank_lo2s_state_t _get_spank_lo2s_state(int job_id, FILE* log_file) {
     return SPANK_STATE_UNKNOWN;
 }
 
+// Open a FIFO for writing without blocking. A blocking open() of a FIFO for
+// writing waits until a reader opens the other end, which would hang the job's
+// init path forever if the lo2s daemon already exited (timeout/crash) or was
+// never started (fork failure). Opening with O_WRONLY|O_NONBLOCK returns
+// immediately with ENXIO when no reader is present, so we can detect that and
+// skip instead of hanging.
+static FILE *open_fifo_for_write(const char *path) {
+    int fd = open(path, O_WRONLY | O_NONBLOCK);
+    if (fd < 0) {
+        return NULL; // no reader (ENXIO) or other error
+    }
+    // A reader is present; drop O_NONBLOCK so subsequent writes block normally
+    // if the pipe buffer is momentarily full (safe: a reader is guaranteed).
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags != -1) {
+        fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    }
+    FILE *f = fdopen(fd, "w");
+    if (!f) {
+        close(fd);
+    }
+    return f;
+}
+
 
 static int check_access(uid_t uid, gid_t gid, const char *path, FILE* log_file);
 static int recursive_chown(uid_t uid, gid_t gid, char* path, FILE* log_file, int recursive);
@@ -625,9 +649,9 @@ int slurm_spank_init_post_opt(spank_t sp, int ac, char **av) {
     // if lo2s is not activated, we will send a CANCEL message to the daemon to stop it from writing to disk
     if (strlen(_lo2s_trace_path) == 0) {
         LOG("SPANK plugin lo2s: No output path set, sending CANCEL to daemon\n");
-        FILE *pipe_file = fopen(pipe_path_write, "w");
+        FILE *pipe_file = open_fifo_for_write(pipe_path_write);
         if (!pipe_file) {
-            LOG("SPANK plugin lo2s: Failed to open pipe file %s to send CANCEL\n", pipe_path_write);
+            LOG("SPANK plugin lo2s: No reader on pipe file %s (daemon gone), skipping CANCEL\n", pipe_path_write);
             CLOSE_LOG();
             return ESPANK_SUCCESS; // Do nothing if no path is set
         }
@@ -662,10 +686,11 @@ int slurm_spank_init_post_opt(spank_t sp, int ac, char **av) {
     LOG("SPANK plugin lo2s:SPANK init post opt PID/PPID: %d/%d\n", getpid(), getppid());
     LOG("SPANK plugin lo2s:SPANK init post opt job info: uid=%d, gid=%d, jid=%d, stepid=%d\n", uid, gid, jid, stepid);
 
-    // this is a FIFO file, we want to write to it. it is already created in the job prolog, so we can just open it for writing
-    FILE *pipe_file = fopen(pipe_path_write, "w");
+    // this is a FIFO file, we want to write to it. it is already created in the job prolog, so we can just open it for writing.
+    // Use a non-blocking open so we do not hang if the daemon already exited (no reader).
+    FILE *pipe_file = open_fifo_for_write(pipe_path_write);
     if (!pipe_file) {
-        LOG("SPANK plugin lo2s: Failed to open pipe file %s", pipe_path_write);
+        LOG("SPANK plugin lo2s: No reader on pipe file %s (daemon gone), skipping\n", pipe_path_write);
         CLOSE_LOG();
         return ESPANK_SUCCESS;
     }
@@ -684,6 +709,7 @@ int slurm_spank_init_post_opt(spank_t sp, int ac, char **av) {
     }
     if (!cgroup_path[0]) {
         LOG("SPANK plugin lo2s: failed to find cgroup for job %d\n", jid);
+        fclose(pipe_file);
         CLOSE_LOG();
         return ESPANK_SUCCESS;
     }
