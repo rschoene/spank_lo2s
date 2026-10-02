@@ -690,9 +690,19 @@ int slurm_spank_init_post_opt(spank_t sp, int ac, char **av) {
 
     LOG("Access check done, writing to path %s\n", _lo2s_trace_path);
     if (strlen(_lo2s_trace_path) == 0) {
-        LOG("SPANK plugin lo2s: No output path set, skipping\n");
+        // Path was cleared due to access denial — send CANCEL so the daemon
+        // exits immediately instead of waiting out its 10s read timeout.
+        LOG("SPANK plugin lo2s: Output path cleared (access denied), sending CANCEL to daemon\n");
+        FILE *pipe_file = open_fifo_for_write(pipe_path_write);
+        if (!pipe_file) {
+            LOG("SPANK plugin lo2s: No reader on pipe file %s (daemon gone), skipping CANCEL\n", pipe_path_write);
+            CLOSE_LOG();
+            return ESPANK_SUCCESS;
+        }
+        fprintf(pipe_file, "CANCEL\n");
+        fclose(pipe_file);
         CLOSE_LOG();
-        return ESPANK_SUCCESS; // Do nothing if no path is set
+        return ESPANK_SUCCESS;
     }
 
     LOG("Next steps\n");
@@ -994,21 +1004,21 @@ static int check_access(uid_t uid, gid_t gid, const char *path, FILE* log_file) 
     }
 
     LOG("Check UID\n");
-    // Check ownership
+    // Check ownership — we need write+execute on the directory to create files in it
     if (st.st_uid == uid) {
         // Owner permissions
-        if (st.st_mode & S_IRUSR && st.st_mode & S_IXUSR) {
-            return 1; // Read and execute access
+        if (st.st_mode & S_IWUSR && st.st_mode & S_IXUSR) {
+            return 1; // Write and execute access
         }
     } else if (st.st_gid == gid) {
         // Group permissions
-        if (st.st_mode & S_IRGRP && st.st_mode & S_IXGRP) {
-            return 1; // Read and execute access
+        if (st.st_mode & S_IWGRP && st.st_mode & S_IXGRP) {
+            return 1; // Write and execute access
         }
     } else {
         // Other permissions
-        if (st.st_mode & S_IROTH && st.st_mode & S_IXOTH) {
-            return 1; // Read and execute access
+        if (st.st_mode & S_IWOTH && st.st_mode & S_IXOTH) {
+            return 1; // Write and execute access
         }
     }
     LOG("No access\n");
