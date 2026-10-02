@@ -18,6 +18,8 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#include "lo2s_args.h"
+
 // RLIMIT
 #ifdef GDB
  #include <sys/resource.h>
@@ -385,7 +387,21 @@ static int lo2d_daemon(int job_id, char pipe_path_read[1024]) {
 
     LOG("lo2d_daemon: Finished tokenizing arguments\n");
 
-    LOG("lo2d_daemon: Starting lo2s daemon with arguments:\n");
+    // Validate arguments against the expected schema. The FIFO is owned by
+    // the job user, who could write arbitrary content between prolog and
+    // init_post_opt. We only accept the exact set of flags that
+    // init_post_opt constructs.
+    lo2s_args_error_t arg_err;
+    if (lo2s_args_validate((const char *const *)(argv + 1), argc - 1, &arg_err) != 0) {
+        LOG("lo2d_daemon: Argument validation failed: %s\n", lo2s_args_error_str(arg_err));
+        for (int i = 0; i < argc; i++) {
+            LOG("lo2d_daemon:   argv[%d] = %s\n", i, argv[i]);
+        }
+        CLOSE_LOG();
+        exit(1);
+    }
+
+    LOG("lo2d_daemon: Arguments validated, starting lo2s daemon:\n");
     for (int i = 0; i < argc; i++) {
         LOG("lo2d_daemon: argv[%d] = %s\n", i, argv[i]);
     }
@@ -530,13 +546,23 @@ int slurm_spank_job_prolog(spank_t sp, int ac, char **av) {
     snprintf(pipe_path_read, sizeof(pipe_path_read), _lo2s_cfg_comm_path_template, jid);
     if (access(pipe_path_read, F_OK) != 0) {
         // this will be a FIFO pipe, so we will use mkfifo to create it
-        int fifo_ok = mkfifo(pipe_path_read, 0666);
+        // 0600 owned by the job user: init_post_opt (S_CTX_REMOTE) runs as
+        // the job user and needs write access. The daemon runs as root and
+        // bypasses permission checks. Other local users cannot write to it,
+        // preventing CANCEL injection or malicious argument injection.
+        int fifo_ok = mkfifo(pipe_path_read, 0600);
         if (fifo_ok == -1) {
             LOG("SPANK job prolog: failed to create pipe file %s\n", pipe_path_read);
             CLOSE_LOG();
             return ESPANK_SUCCESS;
         }
-        LOG( "SPANK job prolog: created pipe file %s\n", pipe_path_read);
+        if (chown(pipe_path_read, uid, gid) != 0) {
+            LOG("SPANK job prolog: failed to chown pipe file %s to %d:%d\n", pipe_path_read, uid, gid);
+            unlink(pipe_path_read);
+            CLOSE_LOG();
+            return ESPANK_SUCCESS;
+        }
+        LOG( "SPANK job prolog: created pipe file %s (uid=%d gid=%d)\n", pipe_path_read, uid, gid);
     } else {
         // FIFO already exists. This is a rare edge case: slurm_spank_job_prolog
         // is called exactly once per job, so a pre-existing FIFO can only mean
