@@ -336,7 +336,7 @@ static int lo2d_daemon(int job_id, char pipe_path_read[1024]) {
             total_bytes_read += bytes_read;
         }
         LOG("lo2d_daemon: Total bytes read: %zd, current: %s\n", total_bytes_read, buffer);
-    } while ((buffer[total_bytes_read - 1] != '\n' || buffer[total_bytes_read - 1] == '\0') || total_bytes_read == 0 );
+    } while (total_bytes_read == 0 || buffer[total_bytes_read - 1] != '\n');
 
     LOG("lo2d_daemon: Finished reading from pipe file, total bytes read: %zd\n", total_bytes_read);
 
@@ -725,7 +725,7 @@ int slurm_spank_init_post_opt(spank_t sp, int ac, char **av) {
 
     char cgroup_path[3072] = {0};
     char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "/usr/bin/find /sys/fs/cgroup -name 'job_%d' | head -n 1", jid);
+    snprintf(cmd, sizeof(cmd), "/usr/bin/find %s -name 'job_%d' | head -n 1", _lo2s_cfg_cgroup_folder, jid);
     FILE *fp = popen(cmd, "r");
     if (fp) {
         if (fgets(cgroup_path, sizeof(cgroup_path), fp) != NULL) {
