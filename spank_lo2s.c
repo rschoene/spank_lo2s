@@ -49,6 +49,11 @@ static char _lo2s_cfg_comm_path_template[2048] = "/tmp/spank_lo2s_%d";
 static char _lo2s_cfg_pid_path_template[2048] = "/tmp/spank_lo2s_%d_pid";
 static char _lo2s_cfg_output_path_template[2048] = "/tmp/spank_lo2s_%d_path";
 
+#ifndef LO2S_SHUTDOWN_TIMEOUT_MS
+#define LO2S_SHUTDOWN_TIMEOUT_MS 60000
+#endif
+static int _lo2s_cfg_shutdown_timeout_ms = LO2S_SHUTDOWN_TIMEOUT_MS;
+
 #ifdef LO2S_DEBUG
 
 #ifndef LO2D_DEBUG_PATH
@@ -810,7 +815,6 @@ int cleanup(spank_t sp,  char * exit_function) {
         }
         fclose(pf);
     }
-    // TODO for now
 
     // unlink the pipe file, so that the lo2s daemon will exit
     char pipe_path_write[3072];
@@ -819,89 +823,88 @@ int cleanup(spank_t sp,  char * exit_function) {
     if (access(pipe_path_write, F_OK) == 0) {     
         if (unlink(pipe_path_write) != 0) {
             LOG("%s: failed to unlink pipe file %s\n", exit_function, pipe_path_write);
-            CLOSE_LOG();
-            return ESPANK_SUCCESS;
+        } else {
+            LOG("%s: unlinked pipe file %s\n", exit_function, pipe_path_write);
         }
     } else {
         LOG("%s: pipe file %s does not exist\n", exit_function, pipe_path_write);
     }
-    LOG("%s: unlinked pipe file %s\n", exit_function, pipe_path_write);
 
 
 
-    // got rid of files, now we will try to kill the dameon, if it exists.
-    if (lo2s_pid <= 0) {
-        LOG("%s: Could not find lo2s daemon PID\n", exit_function);
-        CLOSE_LOG();
-        return ESPANK_SUCCESS;
-    } 
-
-    LOG("%s: Sending SIGINT to lo2s daemon PID %d\n", exit_function, lo2s_pid);
-    // kill the lo2s daemon with SIGINT, so that it can clean up and exit gracefully
-    if (kill(lo2s_pid, SIGINT) != 0) {
-        LOG("%s: sent SIGINT to lo2s daemon PID %d\n", exit_function, lo2s_pid);
-    }
-
-    // wait for the lo2s daemon to exit, but not longer than 10 seconds
-    int wait_time = 0;
-    int max_wait_time = 10000; // 1000 seconds
-    while (wait_time < max_wait_time) {
-        if (kill(lo2s_pid, 0) != 0) {
-            LOG("%s: lo2s daemon PID %d exited gracefully or we cannot kill it (%d)\n", exit_function, lo2s_pid, errno);
-            break;
+    // got rid of files, now we will try to kill the daemon, if it exists.
+    if (lo2s_pid > 0) {
+        LOG("%s: Sending SIGINT to lo2s daemon PID %d\n", exit_function, lo2s_pid);
+        // kill the lo2s daemon with SIGINT, so that it can clean up and exit gracefully
+        if (kill(lo2s_pid, SIGINT) != 0) {
+            LOG("%s: SIGINT to lo2s daemon PID %d failed (%d)\n", exit_function, lo2s_pid, errno);
         }
-        // check whether the process is still in /proc
-        char proc_path[256];
-        snprintf(proc_path, sizeof(proc_path), "/proc/%d", lo2s_pid);
-        if (access(proc_path, F_OK) != 0) {
-            LOG("%s: lo2s daemon PID %d exited gracefully (not in /proc)\n", exit_function, lo2s_pid);
-            break;
+
+        // wait for the lo2s daemon to exit gracefully (building calling context
+        // trees can take a while); timeout is configurable via LO2S_SHUTDOWN_TIMEOUT_MS
+        int wait_time = 0;
+        int max_wait_time = _lo2s_cfg_shutdown_timeout_ms / 100; // 100ms per iteration
+        while (wait_time < max_wait_time) {
+            if (kill(lo2s_pid, 0) != 0) {
+                LOG("%s: lo2s daemon PID %d exited gracefully or we cannot signal it (%d)\n", exit_function, lo2s_pid, errno);
+                break;
+            }
+            // check whether the process is still in /proc
+            char proc_path[256];
+            snprintf(proc_path, sizeof(proc_path), "/proc/%d", lo2s_pid);
+            if (access(proc_path, F_OK) != 0) {
+                LOG("%s: lo2s daemon PID %d exited gracefully (not in /proc)\n", exit_function, lo2s_pid);
+                break;
+            }
+            usleep(100*1000); // sleep for 100ms
+            wait_time++;
         }
-        usleep(100*1000); // sleep for 100ms
-        wait_time++;
-        LOG("%s: waiting for lo2s daemon PID %d to exit gracefully, waited %d ms\n", exit_function, lo2s_pid, wait_time*100);
-    }
-    if (wait_time >= max_wait_time) {
-        LOG("%s: lo2s daemon PID %d did not exit gracefully, sending SIGKILL\n", exit_function, lo2s_pid);
-        if (kill(lo2s_pid, SIGKILL) != 0) {
-            LOG("%s: failed to send SIGKILL to lo2s daemon PID %d\n", exit_function, lo2s_pid);
+        if (wait_time >= max_wait_time) {
+            LOG("%s: lo2s daemon PID %d did not exit gracefully, sending SIGKILL\n", exit_function, lo2s_pid);
+            if (kill(lo2s_pid, SIGKILL) != 0) {
+                LOG("%s: failed to send SIGKILL to lo2s daemon PID %d\n", exit_function, lo2s_pid);
+            }
         }
-        LOG("%s: sent SIGKILL to lo2s daemon PID %d\n", exit_function, lo2s_pid);
+    } else {
+        LOG("%s: No lo2s daemon PID found, skipping kill\n", exit_function);
     }
 
 
     LOG("%s: Cleaning up PID file %s\n", exit_function, pid_file);
     unlink(pid_file);
 
-    // get the ouptut path from the output path file
+    // get the output path from the output path file
     char output_path_file[3072];
     snprintf(output_path_file, sizeof(output_path_file), _lo2s_cfg_output_path_template, jid);
-    FILE *opf = fopen(output_path_file, "r");
-    if (!opf) {
-        LOG("%s: Failed to open output path file %s\n", exit_function, output_path_file);
-        CLOSE_LOG();
-        return ESPANK_SUCCESS;
-    }
-    char output_path[3072];
-    if (fgets(output_path, sizeof(output_path), opf) == NULL) {
-        LOG("%s: Failed to read output path from file %s\n", exit_function, output_path_file);
-        fclose(opf);
-        CLOSE_LOG();
-        return ESPANK_SUCCESS;
-    }
-    fclose(opf);
-    // remove the newline character from the output path
-    output_path[strcspn(output_path, "\n")] = 0;
-    char buffer[4096];
-    snprintf(buffer, sizeof(buffer), "%s/%s", output_path,hostname);
-    LOG("%s: Changing ownership of lo2s output path %s to uid %d and gid %d\n", exit_function, _lo2s_trace_path, uid, gid);
-    // per host: recursive
-    recursive_chown(uid, gid, buffer, log_file, 1);
-    // overall not recursive (already done multiple times)
-    recursive_chown(uid, gid, output_path, log_file, 0);
-
-    // cleanup path file
     if (access(output_path_file, F_OK) == 0) {
+        FILE *opf = fopen(output_path_file, "r");
+        if (opf) {
+            char output_path[3072];
+            if (fgets(output_path, sizeof(output_path), opf) != NULL) {
+                output_path[strcspn(output_path, "\n")] = 0;
+                char buffer[4096];
+                snprintf(buffer, sizeof(buffer), "%s/%s", output_path, hostname);
+                LOG("%s: Changing ownership of lo2s output path %s to uid %d and gid %d\n", exit_function, output_path, uid, gid);
+                // per host: recursive
+                recursive_chown(uid, gid, buffer, log_file, 1);
+                // overall not recursive (already done multiple times)
+                recursive_chown(uid, gid, output_path, log_file, 0);
+
+                // count the size of the output path, including all sub files and print size to LOG
+                char du_cmd[4096];
+                snprintf(du_cmd, sizeof(du_cmd), "du -sh %s", output_path);
+                FILE *du_fp = popen(du_cmd, "r");
+                if (du_fp) {
+                    char du_output[1024];
+                    if (fgets(du_output, sizeof(du_output), du_fp) != NULL) {
+                        LOG("%s: Size of output path %s is %s", exit_function, output_path, du_output);
+                    }
+                    pclose(du_fp);
+                }
+            }
+            fclose(opf);
+        }
+        // cleanup path file
         if (unlink(output_path_file) != 0) {
             LOG("%s: failed to unlink output path file %s\n", exit_function, output_path_file);
         } else {
@@ -911,24 +914,14 @@ int cleanup(spank_t sp,  char * exit_function) {
         LOG("%s: output path file %s does not exist\n", exit_function, output_path_file);
     }
 
-    // count the size of the output path, including all sub files and print size to LOG
-    char du_cmd[4096];
-    snprintf(du_cmd, sizeof(du_cmd), "du -sh %s", output_path);
-    FILE *du_fp = popen(du_cmd, "r");
-    if (du_fp) {
-        char du_output[1024];
-        if (fgets(du_output, sizeof(du_output), du_fp) != NULL) {
-            LOG("%s: Size of output path %s is %s", exit_function, output_path, du_output);
-        }
-        pclose(du_fp);
-    }
 
-
-    // we have to clean up the cgroup in sysfs. We have to remove first all subsdirectories until we are at this cgroups top level, then we can remove the cgroup itself. We will use rmdir to remove the directories, which will fail if they are not empty. We will use a loop to remove all subdirectories until we reach the top level cgroup for this job.
-    // find cgroup of the job
+    // Clean up the cgroup: remove our lo2s_daemon sub-cgroup, then try to
+    // remove the job cgroup. The job cgroup may not be empty (other processes
+    // still running), which is fine — Slurm will retry after our exit.
+    // If our rmdir fails here, the epilog will try again.
     char cgroup_path[3072] = {0};
     char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "/usr/bin/find /sys/fs/cgroup -name 'job_%d' | head -n 1", jid);
+    snprintf(cmd, sizeof(cmd), "/usr/bin/find %s -name 'job_%d' | head -n 1", _lo2s_cfg_cgroup_folder, jid);
     FILE *fp = popen(cmd, "r");
     if (fp) {
         if (fgets(cgroup_path, sizeof(cgroup_path), fp) != NULL) {
@@ -936,32 +929,22 @@ int cleanup(spank_t sp,  char * exit_function) {
         }
         pclose(fp);
     }
-    // if not found, log and return
-    if (!cgroup_path[0]) {
-        LOG("%s: failed to find cgroup for job %d\n", exit_function, jid);
-        CLOSE_LOG();
-        return ESPANK_SUCCESS;
-    }
-    char cgroup_path_to_remove[3072];
-    snprintf(cgroup_path_to_remove, sizeof(cgroup_path_to_remove), "%s/lo2s_daemon", cgroup_path);
-    LOG("%s: Cleaning up cgroup %s\n", exit_function, cgroup_path_to_remove);
-    // remove the cgroup directory
-    if (rmdir(cgroup_path_to_remove) != 0) {
-        LOG("%s: Failed to remove cgroup directory %s\n", exit_function, cgroup_path_to_remove);
+    if (cgroup_path[0]) {
+        char lo2s_cgroup_path[3072];
+        snprintf(lo2s_cgroup_path, sizeof(lo2s_cgroup_path), "%s/lo2s_daemon", cgroup_path);
+        if (rmdir(lo2s_cgroup_path) == 0) {
+            LOG("%s: Removed cgroup directory %s\n", exit_function, lo2s_cgroup_path);
+        } else {
+            LOG("%s: cgroup directory %s not present or not empty (errno=%d)\n", exit_function, lo2s_cgroup_path, errno);
+        }
+        // Try to remove the job cgroup (best-effort; may fail if not empty)
+        if (rmdir(cgroup_path) == 0) {
+            LOG("%s: Removed job cgroup %s\n", exit_function, cgroup_path);
+        } else {
+            LOG("%s: Job cgroup %s not empty, leaving for Slurm (errno=%d)\n", exit_function, cgroup_path, errno);
+        }
     } else {
-        LOG("%s: Removed cgroup directory %s\n", exit_function, cgroup_path_to_remove);
-    }
-    if (rmdir(cgroup_path_to_remove) != 0) {
-        LOG("%s: Failed to remove cgroup directory %s\n", exit_function, cgroup_path_to_remove);
-    } else {
-        LOG("%s: Removed cgroup directory %s\n", exit_function, cgroup_path_to_remove);
-    }
-    // there might still be other cgroups in .../lo2s_daemon/.. path. check for children and subchildren and so on and delete them all. We will use a recursive function to do this. We will use the function remove_directory_recursively() to do this.
-    // remove the cgroup directory recursively
-    if (rmdir(cgroup_path) != 0) {
-        LOG("%s: Failed to remove cgroup directory %s recursively\n", exit_function, cgroup_path);
-    } else {
-        LOG("%s: Removed cgroup directory %s recursively\n", exit_function, cgroup_path);
+        LOG("%s: cgroup for job %d not found, skipping cgroup cleanup\n", exit_function, jid);
     }
     CLOSE_LOG();
     return ESPANK_SUCCESS;
