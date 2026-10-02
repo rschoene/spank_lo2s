@@ -528,7 +528,6 @@ int slurm_spank_job_prolog(spank_t sp, int ac, char **av) {
     // the lo2s daemon will read the arguments from the file /tmp/spank_lo2s_<jobid> and write the return value to /tmp/spank_lo2s_<jobid>_ret
     char pipe_path_read[1024];
     snprintf(pipe_path_read, sizeof(pipe_path_read), _lo2s_cfg_comm_path_template, jid);
-    // list everything under /tmp/ to log_file
     if (access(pipe_path_read, F_OK) != 0) {
         // this will be a FIFO pipe, so we will use mkfifo to create it
         int fifo_ok = mkfifo(pipe_path_read, 0666);
@@ -537,11 +536,19 @@ int slurm_spank_job_prolog(spank_t sp, int ac, char **av) {
             CLOSE_LOG();
             return ESPANK_SUCCESS;
         }
+        LOG( "SPANK job prolog: created pipe file %s\n", pipe_path_read);
     } else {
-        LOG( "SPANK job prolog: pipe file %s already exists\n", pipe_path_read);
+        // FIFO already exists. This is a rare edge case: slurm_spank_job_prolog
+        // is called exactly once per job, so a pre-existing FIFO can only mean
+        // that Slurm recycled this job ID and the previous job's epilog failed
+        // to clean up (e.g. node crash, OOM kill of slurmstepd, or the daemon
+        // was still in its 10s read-timeout when the node went down).
+        // We do NOT start a fresh daemon here — the job will simply run without
+        // lo2s monitoring. The epilog will clean up the stale artifacts.
+        LOG( "SPANK job prolog: pipe file %s already exists (stale state from previous job?), skipping daemon start\n", pipe_path_read);
+        CLOSE_LOG();
         return ESPANK_SUCCESS;
     }
-    LOG( "SPANK job prolog: created pipe file %s\n", pipe_path_read);
     CLOSE_LOG();
     // now that we have the pipe file, we can start the lo2s daemon in the background and pass the pipe file path to it
     int intermediate_child = fork();
@@ -588,7 +595,11 @@ int slurm_spank_job_prolog(spank_t sp, int ac, char **av) {
         // parent process: continue
 //        LOG("SPANK job prolog: started lo2s daemon with PID %d\n", daemon_pid);
     } else {
-//        LOG("SPANK job prolog: failed to fork lo2s daemon\n");
+        // fork failed: remove the FIFO we just created so we don't leave
+        // an orphan FIFO with no reader (which would cause init_post_opt
+        // to skip via ENXIO, but it's cleaner to not have it at all).
+        LOG("SPANK job prolog: failed to fork lo2s daemon, removing pipe file\n");
+        unlink(pipe_path_read);
     }
 //    LOG( "prolog success\n");
 
