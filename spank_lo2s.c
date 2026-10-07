@@ -960,6 +960,7 @@ int cleanup(spank_t sp, char * exit_function) {
 
 // we need this at the end of task exit for the extern task, which should be the last to end
 int slurm_spank_exit(spank_t sp, int ac, char **av) {
+#ifdef SLURM_EXTERN_CONT
     int jid, stepid;
     spank_get_item(sp, S_JOB_ID, &jid);
     spank_get_item(sp, S_JOB_STEPID, &stepid);
@@ -968,6 +969,13 @@ int slurm_spank_exit(spank_t sp, int ac, char **av) {
     }
 
     return cleanup(sp, "slurm_spank_exit extern step");
+#else
+    // SLURM_EXTERN_CONT is not defined on this Slurm version; the job epilog
+    // (slurm_spank_job_epilog) performs the cleanup instead.
+    #pragma message "SLURM_EXTERN_CONT is not defined by this Slurm version; cleanup at extern step exit will be skipped (the job epilog performs cleanup instead)."
+    (void)sp; (void)ac; (void)av;
+    return ESPANK_SUCCESS;
+#endif
 }
 
 int slurm_spank_job_epilog(spank_t sp, int ac, char **av) {
