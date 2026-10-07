@@ -136,60 +136,6 @@ static int _lo2s_cfg_shutdown_timeout_ms = LO2S_SHUTDOWN_TIMEOUT_MS;
 
 #endif
 
-typedef enum {
-    SPANK_STATE_EMPTY = 0, // before prolog and after epilog, no pipe file, no pid file, no path file
-    SPANK_STATE_DAEMON_WAITS = 1, // after prolog, before init_post_opt, pipe file exists, pid file exists, path file does not exist
-    SPANK_STATE_DAEMON_RUNNING = 2, // after init_post_opt, pipe file does not exist, pid file exists, path file exists
-    SPANK_STATE_DAEMON_DEAD = 3, // after init_post_opt, pid file exists, path file exists, but pid is not alive
-    SPANK_STATE_DAEMON_NOT_ALIVE_PIPE_EXISTS = 4, // can be before the daemon starts, after prolog until 
-    SPANK_STATE_UNKNOWN = 5
-} spank_lo2s_state_t;
-
-static spank_lo2s_state_t _get_spank_lo2s_state(int job_id, FILE* log_file) {
-    bool pipe_exists = false, pid_exists = false, path_exists = false, pid_alive = false;
-    // check if the pipe file exists
-    char path[1024];
-    snprintf(path, sizeof(path), _lo2s_cfg_comm_path_template, job_id);
-    pipe_exists = (access(path, F_OK) == 0);
-    snprintf(path, sizeof(path), _lo2s_cfg_pid_path_template, job_id);
-    pid_exists = (access(path, F_OK) == 0);
-    if (pid_exists) {
-        // check if the pid is alive
-        FILE *pid_file = fopen(path, "r");
-        if (pid_file) {
-            int pid;
-            fscanf(pid_file, "%d", &pid);
-            fclose(pid_file);
-            if (kill(pid, 0) == 0) {
-                pid_alive = true;
-            }
-        }
-    }
-    snprintf(path, sizeof(path), _lo2s_cfg_output_path_template, job_id);
-    path_exists = (access(path, F_OK) == 0);
-    // if there is neither a pipe file, nor a path file, nor a pid file, then the state is SPANK_STATE_EMPTY
-    if (!pipe_exists && !pid_exists && !path_exists) {
-        return SPANK_STATE_EMPTY;
-    }
-    // if there is a pipe file, but no pid file, then the state is SPANK_STATE_DAEMON_NOT_ALIVE_PIPE_EXISTS
-    if (pipe_exists && !pid_exists) {
-        return SPANK_STATE_DAEMON_NOT_ALIVE_PIPE_EXISTS;
-    }
-    // if there is a pipe file and a pid file, but the pid is not alive, then the state is SPANK_STATE_DAEMON_DEAD
-    if (pid_exists && !pid_alive) {
-        return SPANK_STATE_DAEMON_DEAD;
-    }
-    // the pipe is deleted before lo2s starts
-    if (pipe_exists && pid_exists && pid_alive) {
-        return SPANK_STATE_DAEMON_WAITS;
-    }
-    // if there is a path file, then the state is SPANK_STATE_DAEMON_RUNNING
-    if (!pipe_exists && path_exists && pid_exists && pid_alive) {
-        return SPANK_STATE_DAEMON_RUNNING;
-    }
-    return SPANK_STATE_UNKNOWN;
-}
-
 // Open a FIFO for writing without blocking. A blocking open() of a FIFO for
 // writing waits until a reader opens the other end, which would hang the job's
 // init path forever if the lo2s daemon already exited (timeout/crash) or was
@@ -412,6 +358,7 @@ static int lo2d_daemon(int job_id, char pipe_path_read[1024]) {
     // the job user, who could write arbitrary content between prolog and
     // init_post_opt. We only accept the exact set of flags that
     // init_post_opt constructs.
+    (void)lo2s_args_error_str; // referenced only from LOG() in debug builds
     lo2s_args_error_t arg_err;
     if (lo2s_args_validate((const char *const *)(argv + 1), argc - 1, &arg_err) != 0) {
         LOG("lo2d_daemon: Argument validation failed: %s\n", lo2s_args_error_str(arg_err));
@@ -456,7 +403,7 @@ static int lo2d_daemon(int job_id, char pipe_path_read[1024]) {
     // Create a sub-cgroup inside the job cgroup so lo2s shares the job's
     // resource allocation and is killed when the job ends.
     // e.g. /sys/fs/cgroup/system.slice/slurmstepd.scope/job_12345/lo2s_daemon
-    char lo2s_cgroup_path[3072];
+    char lo2s_cgroup_path[3072 + 16];
     snprintf(lo2s_cgroup_path, sizeof(lo2s_cgroup_path), "%s/lo2s_daemon", cgroup_path);
     if (mkdir(lo2s_cgroup_path, 0755) != 0) {
         LOG("lo2d_daemon: Failed to create cgroup %s (errno=%d)\n", lo2s_cgroup_path, errno);
@@ -466,7 +413,7 @@ static int lo2d_daemon(int job_id, char pipe_path_read[1024]) {
     LOG("lo2d_daemon: Created cgroup %s\n", lo2s_cgroup_path);
 
     // Move the daemon into the cgroup
-    char cgroup_procs_path[3072];
+    char cgroup_procs_path[3072 + 32];
     snprintf(cgroup_procs_path, sizeof(cgroup_procs_path), "%s/cgroup.procs", lo2s_cgroup_path);
     FILE *cgroup_procs_file = fopen(cgroup_procs_path, "w");
     if (!cgroup_procs_file) {
@@ -795,7 +742,7 @@ int slurm_spank_init_post_opt(spank_t sp, int ac, char **av) {
 
 
     char hostname[1024];
-    char buffer[4096];
+    char buffer[8192];
     gethostname(hostname, sizeof(hostname));
 
     LOG( "hostname: %s\n", hostname);
@@ -830,7 +777,7 @@ int slurm_spank_init_post_opt(spank_t sp, int ac, char **av) {
 
     fprintf(pipe_file, "%s\n", buffer);
 
-    LOG( "sent options: %s %d\n", buffer, strlen(buffer));
+    LOG( "sent options: %s (%zu bytes)\n", buffer, strlen(buffer));
 
     fclose(pipe_file);
 
@@ -996,7 +943,7 @@ int cleanup(spank_t sp, char * exit_function) {
         pclose(fp);
     }
     if (cgroup_path[0]) {
-        char lo2s_cgroup_path[3072];
+        char lo2s_cgroup_path[3072 + 16];
         snprintf(lo2s_cgroup_path, sizeof(lo2s_cgroup_path), "%s/lo2s_daemon", cgroup_path);
         if (rmdir(lo2s_cgroup_path) == 0) {
             LOG("%s: Removed cgroup %s\n", exit_function, lo2s_cgroup_path);
@@ -1013,14 +960,13 @@ int cleanup(spank_t sp, char * exit_function) {
 
 // we need this at the end of task exit for the extern task, which should be the last to end
 int slurm_spank_exit(spank_t sp, int ac, char **av) {
-        int jid, uid, gid, stepid;
+    int jid, stepid;
     spank_get_item(sp, S_JOB_ID, &jid);
     spank_get_item(sp, S_JOB_STEPID, &stepid);
     if (stepid != SLURM_EXTERN_CONT) {
         return ESPANK_SUCCESS; // Do nothing in step context
     }
 
-    int context = spank_context();
     return cleanup(sp, "slurm_spank_exit extern step");
 }
 
