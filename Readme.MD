@@ -191,11 +191,10 @@ Before deploying this on a production system, verify:
 
 1. the `lo2s` binary path is correct
 2. the cgroup root matches the actual Slurm environment
-3. the output directory is writable and accessible
-4. `/tmp` is suitable for FIFO communication on all nodes
-5. the Slurm plugin directory is correct for this installation
-6. the plugin is loaded through the cluster’s Slurm configuration
-7. the matching Slurm headers and runtime library are installed
+3. `/tmp` is suitable for FIFO communication on all nodes and is only a local file system
+4. the Slurm plugin directory is correct for this installation
+5. the plugin is loaded through the cluster’s Slurm configuration (`plugstack.conf`)
+6. the matching Slurm headers and runtime library are installed
 
 ## License
 

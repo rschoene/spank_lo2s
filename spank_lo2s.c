@@ -679,9 +679,15 @@ int slurm_spank_init_post_opt(spank_t sp, int ac, char **av) {
     if (strlen(_lo2s_trace_path) > 0) {
         // check whether uid is allowed to write to _lo2s_path, if not, disable writing to disk. Taht is not getuid() but the uid of the job, which is passed to us by spank_get_item
         // We need to check the permissions of the directory, not the file itself
-        if (check_access(uid, gid, _lo2s_trace_path, log_file) != 1) {
-            LOG("SPANK plugin lo2s: User %d is not allowed to write to lo2s output path %s, disabling writing to disk", uid, _lo2s_trace_path);
-            slurm_error("SPANK plugin lo2s: User %d is not allowed to write to lo2s output path %s, disabling writing to disk", uid, _lo2s_trace_path);
+        int access_result = check_access(uid, gid, _lo2s_trace_path, log_file);
+        if (access_result != 1) {
+            if (access_result == -1) {
+                LOG("SPANK plugin lo2s: Output path %s does not exist, disabling writing to disk", _lo2s_trace_path);
+                slurm_error("SPANK plugin lo2s: Output path %s does not exist, disabling writing to disk", _lo2s_trace_path);
+            } else {
+                LOG("SPANK plugin lo2s: User %d is not allowed to write to lo2s output path %s, disabling writing to disk", uid, _lo2s_trace_path);
+                slurm_error("SPANK plugin lo2s: User %d is not allowed to write to lo2s output path %s, disabling writing to disk", uid, _lo2s_trace_path);
+            }
             _lo2s_trace_path[0] = '\0';
         }
     }
