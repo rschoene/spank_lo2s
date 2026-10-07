@@ -1,0 +1,11 @@
+# Python
+.venv/
+__pycache__/
+
+# Build artifacts
+*.so
+
+# Local-only directories (not part of the source)
+overhead/
+slurm/
+debug/

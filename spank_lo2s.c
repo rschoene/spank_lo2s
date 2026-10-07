@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <stdbool.h>
 
 #include "lo2s_args.h"
 
@@ -287,8 +288,8 @@ struct spank_option all_spank_options[] = {
     {
         // set lo2s metrics
         "lo2s-standard-metrics",
-        "FREQUENCY_IN_HZ",
-        "set the frequency of the metrics for the lo2s monitoring process, use lo2s --list-metrics to see available metrics",
+        "",
+        "enables standard metrics for the lo2s monitoring process",
         0, 0, _lo2s_standard_metrics_cb
     },
     SPANK_OPTIONS_TABLE_END
@@ -297,6 +298,7 @@ struct spank_option all_spank_options[] = {
 static int lo2d_daemon(int job_id, char pipe_path_read[1024]) {
 
     OPEN_LOG(LO2D_DEBUG_PATH, job_id, 0, 0, -1);
+
     // tokenize the arguments and store them in an array
     char buffer[1024];
     // read exactly one line from the pipe file, which should contain the arguments for lo2s
@@ -406,7 +408,10 @@ static int lo2d_daemon(int job_id, char pipe_path_read[1024]) {
         LOG("lo2d_daemon: argv[%d] = %s\n", i, argv[i]);
     }
 
-    // now we try to find the cgroup of the job and move the daemon into that cgroup, so that it is killed when the job ends
+    // Find the job cgroup and create a lo2s_daemon sub-cgroup inside it.
+    // This way lo2s shares the job's resource allocation (cpuset, memory)
+    // and is killed when the job ends. The SPANK epilog sends SIGINT for
+    // graceful shutdown before the cgroup is removed.
     LOG("lo2d_daemon: Trying to find cgroup for job %d\n", job_id);
 
     char cgroup_path[3072] = {0};
@@ -429,18 +434,19 @@ static int lo2d_daemon(int job_id, char pipe_path_read[1024]) {
         return -1;
     }
 
-    // skip the cgroup for now
-    // create a directory in the cgroup path for the lo2s daemon, so that it is killed when the job ends
+    // Create a sub-cgroup inside the job cgroup so lo2s shares the job's
+    // resource allocation and is killed when the job ends.
+    // e.g. /sys/fs/cgroup/system.slice/slurmstepd.scope/job_12345/lo2s_daemon
     char lo2s_cgroup_path[3072];
     snprintf(lo2s_cgroup_path, sizeof(lo2s_cgroup_path), "%s/lo2s_daemon", cgroup_path);
     if (mkdir(lo2s_cgroup_path, 0755) != 0) {
-        LOG("lo2d_daemon: Failed to create cgroup directory %s\n", lo2s_cgroup_path);
+        LOG("lo2d_daemon: Failed to create cgroup %s (errno=%d)\n", lo2s_cgroup_path, errno);
         CLOSE_LOG();
         return -1;
     }
-    LOG("lo2d_daemon: Created cgroup directory %s\n", lo2s_cgroup_path);
+    LOG("lo2d_daemon: Created cgroup %s\n", lo2s_cgroup_path);
 
-    // move the daemon into the cgroup by writing its PID to the cgroup.procs file
+    // Move the daemon into the cgroup
     char cgroup_procs_path[3072];
     snprintf(cgroup_procs_path, sizeof(cgroup_procs_path), "%s/cgroup.procs", lo2s_cgroup_path);
     FILE *cgroup_procs_file = fopen(cgroup_procs_path, "w");
@@ -451,7 +457,7 @@ static int lo2d_daemon(int job_id, char pipe_path_read[1024]) {
     }
     fprintf(cgroup_procs_file, "%d\n", getpid());
     fclose(cgroup_procs_file);
-    LOG("lo2d_daemon: Moved daemon into cgroup %s\n", lo2s_cgroup_path);
+    LOG("lo2d_daemon: Moved daemon into sibling cgroup %s\n", lo2s_cgroup_path);
 
 
 #ifdef GDB
@@ -826,7 +832,7 @@ int slurm_spank_init_post_opt(spank_t sp, int ac, char **av) {
     return ESPANK_SUCCESS;
 }
 
-int cleanup(spank_t sp,  char * exit_function) {
+int cleanup(spank_t sp, char * exit_function) {
     char hostname[1024];
     gethostname(hostname,sizeof(hostname));
     
@@ -896,18 +902,14 @@ int cleanup(spank_t sp,  char * exit_function) {
                 LOG("%s: lo2s daemon PID %d exited gracefully or we cannot signal it (%d)\n", exit_function, lo2s_pid, errno);
                 break;
             }
-            // check whether the process is still in /proc
-            char proc_path[256];
-            snprintf(proc_path, sizeof(proc_path), "/proc/%d", lo2s_pid);
-            if (access(proc_path, F_OK) != 0) {
-                LOG("%s: lo2s daemon PID %d exited gracefully (not in /proc)\n", exit_function, lo2s_pid);
-                break;
-            }
             usleep(100*1000); // sleep for 100ms
             wait_time++;
         }
         if (wait_time >= max_wait_time) {
             LOG("%s: lo2s daemon PID %d did not exit gracefully, sending SIGKILL\n", exit_function, lo2s_pid);
+            slurm_error("spank_lo2s: lo2s daemon (PID %d) did not exit within %d ms, sending SIGKILL. "
+                        "Increase LO2S_SHUTDOWN_TIMEOUT_MS if lo2s is still writing trace data.",
+                        lo2s_pid, _lo2s_cfg_shutdown_timeout_ms);
             if (kill(lo2s_pid, SIGKILL) != 0) {
                 LOG("%s: failed to send SIGKILL to lo2s daemon PID %d\n", exit_function, lo2s_pid);
             }
@@ -962,10 +964,8 @@ int cleanup(spank_t sp,  char * exit_function) {
     }
 
 
-    // Clean up the cgroup: remove our lo2s_daemon sub-cgroup, then try to
-    // remove the job cgroup. The job cgroup may not be empty (other processes
-    // still running), which is fine — Slurm will retry after our exit.
-    // If our rmdir fails here, the epilog will try again.
+    // Clean up the lo2s_daemon sub-cgroup. We never touch the job cgroup
+    // itself — that's managed by Slurm's cgroup plugin.
     char cgroup_path[3072] = {0};
     char cmd[4096];
     snprintf(cmd, sizeof(cmd), "/usr/bin/find %s -name 'job_%d' | head -n 1", _lo2s_cfg_cgroup_folder, jid);
@@ -980,15 +980,9 @@ int cleanup(spank_t sp,  char * exit_function) {
         char lo2s_cgroup_path[3072];
         snprintf(lo2s_cgroup_path, sizeof(lo2s_cgroup_path), "%s/lo2s_daemon", cgroup_path);
         if (rmdir(lo2s_cgroup_path) == 0) {
-            LOG("%s: Removed cgroup directory %s\n", exit_function, lo2s_cgroup_path);
+            LOG("%s: Removed cgroup %s\n", exit_function, lo2s_cgroup_path);
         } else {
-            LOG("%s: cgroup directory %s not present or not empty (errno=%d)\n", exit_function, lo2s_cgroup_path, errno);
-        }
-        // Try to remove the job cgroup (best-effort; may fail if not empty)
-        if (rmdir(cgroup_path) == 0) {
-            LOG("%s: Removed job cgroup %s\n", exit_function, cgroup_path);
-        } else {
-            LOG("%s: Job cgroup %s not empty, leaving for Slurm (errno=%d)\n", exit_function, cgroup_path, errno);
+            LOG("%s: Cgroup %s not present or not empty (errno=%d)\n", exit_function, lo2s_cgroup_path, errno);
         }
     } else {
         LOG("%s: cgroup for job %d not found, skipping cgroup cleanup\n", exit_function, jid);
