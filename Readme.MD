@@ -1,5 +1,7 @@
 # SPANK lo2s plugin
 
+[![build](https://github.com/rschoene/spank_lo2s/actions/workflows/build.yml/badge.svg)](https://github.com/rschoene/spank_lo2s/actions/workflows/build.yml)
+
 This project contains a Slurm SPANK plugin that starts and manages the `lo2s` profiler for a job. The plugin runs during the Slurm job lifecycle and forwards job metadata and cgroup information to `lo2s` so that output can be captured under a job-specific directory.
 
 ## What this plugin does
