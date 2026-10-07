@@ -1,0 +1,49 @@
+name: build
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (ubuntu ${{ matrix.ubuntu }})
+    runs-on: ubuntu-${{ matrix.ubuntu }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: [ "22.04", "24.04" ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libslurm-dev
+
+      - name: Show Slurm version
+        run: |
+          dpkg -l | grep -i slurm || true
+          ls -la /usr/include/slurm/ || true
+
+      - name: Build (default)
+        run: make
+
+      - name: Build (release)
+        run: make release
+
+      - name: Build (debug)
+        run: make debug
+
+      - name: Build (debug-gdb)
+        run: make debug-gdb
+
+      - name: Verify artifact
+        run: |
+          test -f spank_lo2s.so
+          file spank_lo2s.so
