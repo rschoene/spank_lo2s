@@ -214,6 +214,13 @@ static int _lo2s_standard_metrics_cb(int val, const char *optarg, int remote) {
     return 0;
 }
 
+// callback executed when the lo2s-event option is set
+static int _lo2s_io = 0;
+static int _lo2s_io_cb(int val, const char *optarg, int remote) {
+    _lo2s_io = 1;
+    return 0;
+}
+
 struct spank_option all_spank_options[] = {
     {
         // sets the arguments for the lo2s daemon, which will be passed to the lo2s process
@@ -256,6 +263,13 @@ struct spank_option all_spank_options[] = {
         "",
         "enables standard metrics for the lo2s monitoring process",
         0, 0, _lo2s_standard_metrics_cb
+    },
+    {
+        // set lo2s metrics
+        "lo2s-io",
+        "",
+        "enables IO-monitoring for the lo2s monitoring process",
+        0, 0, _lo2s_io_cb
     },
     SPANK_OPTIONS_TABLE_END
 };
@@ -508,7 +522,6 @@ int slurm_spank_job_prolog(spank_t sp, int ac, char **av) {
         CLOSE_LOG();
         return ESPANK_SUCCESS; // Do nothing in remote context
     }
-    slurm_error("slurm_spank_prolog: Start");
 
     LOG("SPANK job prolog: Starting lo2s daemon for job %d.%d (user: %d, group: %d), pid/ppid: %d/%d\n", jid, stepid, uid, gid, getpid(), getppid());
 
@@ -779,6 +792,9 @@ int slurm_spank_init_post_opt(spank_t sp, int ac, char **av) {
     }
     if (_lo2s_standard_metrics > 0) {
         snprintf(buffer + strlen(buffer), sizeof(buffer) - strlen(buffer), " --standard-metrics");
+    }
+    if (_lo2s_io > 0) {
+        snprintf(buffer + strlen(buffer), sizeof(buffer) - strlen(buffer), " --posix-io");
     }
 
     fprintf(pipe_file, "%s\n", buffer);

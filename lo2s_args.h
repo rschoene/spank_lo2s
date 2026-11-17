@@ -87,8 +87,7 @@ static int lo2s_args_validate(const char *const args[], int argc, lo2s_args_erro
 
     // Track which flags we've seen
     int seen_q = 0, seen_A = 0, seen_dwarf = 0, seen_cgroup = 0;
-    int seen_o = 0, seen_e = 0, seen_c = 0, seen_metric_freq = 0, seen_std_metrics = 0;
-
+    int seen_o = 0, seen_e = 0, seen_c = 0, seen_metric_freq = 0, seen_std_metrics = 0, seen_io = 0;
     int i = 0;
     while (i < argc) {
         const char *flag = args[i];
@@ -151,6 +150,10 @@ static int lo2s_args_validate(const char *const args[], int argc, lo2s_args_erro
 
         } else if (strcmp(flag, "--standard-metrics") == 0) {
             if (seen_std_metrics++) { *err = LO2S_ARGS_DUPLICATE; return -1; }
+            i++;
+
+        } else if (strcmp(flag, "--posix-io") == 0) {
+            if (seen_io++) { *err = LO2S_ARGS_DUPLICATE; return -1; }
             i++;
 
         } else {
